@@ -1,21 +1,16 @@
-# Byte-compiled / cache
+# Python
 __pycache__/
 *.py[cod]
+
+# Django DB
 *.sqlite3
 
 # Virtual environment
 env/
 venv/
 
-# Django stuff:
+# Logs
 *.log
-*.pot
-*.pyc
-local_settings.py
-db.sqlite3
-
-# OS
-.DS_Store
 
 # IDE
 .vscode/
