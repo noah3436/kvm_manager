@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Quản lý VM KVM</title>
+    <meta charset="UTF-8">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="container mt-4">
+    <h2 class="mb-4">Quản lý máy ảo</h2>
+
+    <!-- Form tạo VM -->
+    <form id="vmForm" class="row g-2 mb-4">
+        <div class="col-md-3">
+            <select name="template" class="form-select" required>
+                <option value="">Chọn hệ điều hành</option>
+                <option value="ubuntu">Ubuntu 20.04</option>
+                <option value="centos">CentOS 7</option>
+                <option value="debian">Debian 11</option>
+                <option value="win7">Windows 7</option>
+                <option value="win10">Windows 10</option>
+            </select>
+        </div>
+        <div class="col-md-3">
+            <select name="config" class="form-select" required>
+                <option value="">Chọn cấu hình</option>
+                <option value="low">Thấp (1 CPU, 1GB RAM, 5GB)</option>
+                <option value="medium">Vừa (2 CPU, 2GB RAM, 10GB)</option>
+                <option value="high">Cao (4 CPU, 4GB RAM, 20GB)</option>
+            </select>
+        </div>
+        <div class="col-md-3">
+            <input type="text" name="name" class="form-control" placeholder="Tên máy ảo" required />
+        </div>
+        <div class="col-md-3">
+            <button class="btn btn-success w-100" type="submit">Tạo máy ảo</button>
+        </div>
+    </form>
+
+    <!-- Kết quả tạo -->
+    <div id="result" class="alert d-none"></div>
+
+    <hr>
+    <h4>Danh sách máy ảo</h4>
+    <ul id="vmList" class="list-group"></ul>
+
+    <!-- JavaScript -->
+    <script>
+        async function fetchVMs() {
+            const res = await fetch('/api/vm/list/');
+            const data = await res.json();
+            const list = document.getElementById('vmList');
+            list.innerHTML = '';
+
+            if (!data.vms || data.vms.length === 0) {
+                list.innerHTML = '<li class="list-group-item">Không có máy ảo nào</li>';
+                return;
+            }
+
+            data.vms.forEach(vm => {
+                const li = document.createElement('li');
+                li.className = 'list-group-item d-flex justify-content-between align-items-center';
+
+                let buttons = `
+                    <button class="btn btn-danger btn-sm me-2" onclick="deleteVM('${vm.name}')">Xoá</button>
+                `;
+
+                if (vm.status === 'running' && vm.web_port) {
+                    const vncUrl = `http://${location.hostname}:${vm.web_port}/vnc.html?host=${location.hostname}&port=${vm.web_port}`;
+                    buttons += `<a href="${vncUrl}" target="_blank" class="btn btn-primary btn-sm">Truy cập</a>`;
+                }
+
+                li.innerHTML = `<strong>${vm.name}</strong> - ${vm.status} ${vm.vnc_port ? `(VNC: ${vm.vnc_port})` : ''}
+                    <div>${buttons}</div>`;
+                list.appendChild(li);
+            });
+        }
+
+        async function deleteVM(name) {
+            if (!confirm(`Xoá máy ảo "${name}"?`)) return;
+            const res = await fetch('/api/vm/delete/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name })
+            });
+            const data = await res.json();
+            alert(data.message || data.error);
+            fetchVMs();
+        }
+
+        document.getElementById('vmForm').addEventListener('submit', async e => {
+            e.preventDefault();
+            const form = e.target;
+            const payload = {
+                name: form.name.value,
+                template: form.template.value,
+                config: form.config.value
+            };
+            const res = await fetch('/api/vm/create/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const data = await res.json();
+
+            const alertBox = document.getElementById('result');
+            alertBox.className = 'alert mt-3 ' + (res.ok ? 'alert-success' : 'alert-danger');
+            alertBox.innerHTML = res.ok
+                ? `✅ ${data.message}<br><a href="${data.vnc_url}" target="_blank" class="btn btn-primary mt-2">Truy cập VM</a>`
+                : `❌ ${data.error}`;
+            alertBox.classList.remove('d-none');
+
+            if (res.ok) {
+                form.reset();
+                fetchVMs();
+            }
+        });
+
+        fetchVMs();
+    </script>
+</body>
+</html>
