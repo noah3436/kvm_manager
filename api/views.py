@@ -12,7 +12,7 @@ def home(request):
     return render(request, 'home.html')
 
 
-# Ánh xạ cấu hình
+# Lấy cấu hình theo preset
 def get_config(config_name):
     return {
         'low':    {'cpu': 1, 'ram': 1024, 'disk': '5G'},
@@ -20,8 +20,7 @@ def get_config(config_name):
         'high':   {'cpu': 4, 'ram': 4096, 'disk': '20G'},
     }.get(config_name)
 
-
-# Tìm cổng VNC trống
+# Tìm cổng VNC chưa dùng
 def get_free_vnc_port(start=5901, end=5999):
     for port in range(start, end):
         result = subprocess.run(["ss", "-ltn"], stdout=subprocess.PIPE)
@@ -29,11 +28,11 @@ def get_free_vnc_port(start=5901, end=5999):
             return port
     raise Exception("Không tìm thấy cổng VNC trống")
 
-# Khởi động websockify để tạo link VNC
+# Chạy websockify với noVNC
 def start_novnc(vnc_port, web_port):
     subprocess.Popen([
         "websockify",
-        f"{web_port}",
+        str(web_port),
         f"localhost:{vnc_port}",
         "--web=/usr/share/novnc",
         "--daemon"
@@ -42,43 +41,68 @@ def start_novnc(vnc_port, web_port):
 @csrf_exempt
 def create_vm(request):
     if request.method == 'POST':
-        data = json.loads(request.body)
-        name = data.get('name')
-        template = data.get('template')
-
-        iso_map = {
-            'ubuntu': '/var/lib/libvirt/images/ubuntu-20.04.iso',
-            'centos': '/var/lib/libvirt/images/CentOS-7.iso',
-            'debian': '/var/lib/libvirt/images/debian-11.iso',
-            'win7': '/var/lib/libvirt/images/win7.iso',
-            'win10': '/var/lib/libvirt/images/win10.iso',
-        }
-
-        iso_path = iso_map.get(template)
-        if not iso_path or not os.path.exists(iso_path):
-            return JsonResponse({'error': 'Template không hợp lệ hoặc file ISO không tồn tại'}, status=400)
-
         try:
-            disk_path = f"/var/lib/libvirt/images/{name}.qcow2"
-            subprocess.run(["qemu-img", "create", "-f", "qcow2", disk_path, "15G"], check=True)
+            data = json.loads(request.body)
+            name = data.get('name')
+            template = data.get('template')
+            config_name = data.get('config', 'low')
 
+            config = get_config(config_name)
+            if not config:
+                return JsonResponse({'error': 'Cấu hình không hợp lệ'}, status=400)
+
+            # Map ISO theo template
+            iso_map = {
+                'ubuntu': '/var/lib/libvirt/images/ubuntu-20.04.iso',
+                'win7': '/var/lib/libvirt/images/win7.iso',
+                'win10': '/var/lib/libvirt/images/win10.iso',
+            }
+
+            iso_path = iso_map.get(template)
+            if not iso_path or not os.path.exists(iso_path):
+                return JsonResponse({'error': 'Template không hợp lệ hoặc ISO không tồn tại'}, status=400)
+
+            # Chọn bus và device theo OS
+            if template == 'ubuntu':
+                disk_bus = 'sata'
+                target_dev = 'sda'
+            else:
+                disk_bus = 'virtio'
+                target_dev = 'vda'
+
+            ram = config['ram']
+            cpu = config['cpu']
+            disk_size = config['disk']
+            disk_path = f"/var/lib/libvirt/images/{name}.qcow2"
+
+            # Tạo ổ đĩa qcow2
+            subprocess.run(["qemu-img", "create", "-f", "qcow2", disk_path, disk_size], check=True)
+
+            # Lấy cổng VNC và websockify
             vnc_port = get_free_vnc_port()
             web_port = 6000 + (vnc_port - 5900)
 
+            # XML tạo VM
             xml = f"""
             <domain type='kvm'>
               <name>{name}</name>
-              <memory unit='MiB'>1024</memory>
-              <vcpu>1</vcpu>
+              <memory unit='MiB'>{ram}</memory>
+              <vcpu>{cpu}</vcpu>
               <os>
                 <type arch='x86_64' machine='pc'>hvm</type>
                 <boot dev='cdrom'/>
               </os>
+              <features>
+                <acpi/>
+                <apic/>
+                <pae/>
+              </features>
+              <cpu mode='host-model'/>
               <devices>
                 <disk type='file' device='disk'>
                   <driver name='qemu' type='qcow2'/>
                   <source file='{disk_path}'/>
-                  <target dev='vda' bus='virtio'/>
+                  <target dev='{target_dev}' bus='{disk_bus}'/>
                 </disk>
                 <disk type='file' device='cdrom'>
                   <driver name='qemu' type='raw'/>
@@ -86,27 +110,36 @@ def create_vm(request):
                   <target dev='hdc' bus='ide'/>
                   <readonly/>
                 </disk>
+                <interface type='bridge'>
+                  <source bridge='vmbr0'/>
+                  <model type='virtio'/>
+                </interface>
                 <graphics type='vnc' port='{vnc_port}' listen='0.0.0.0'/>
               </devices>
             </domain>
             """
 
+            # Tạo và khởi động máy ảo
             conn = libvirt.open('qemu:///system')
             dom = conn.defineXML(xml)
             dom.create()
             conn.close()
 
+            # Mở websockify cho VNC
             start_novnc(vnc_port, web_port)
+
+            # Lấy IP server
+            host_ip = request.get_host().split(":")[0]
 
             return JsonResponse({
                 'message': f'VM {name} đã được tạo từ {template}.',
-                'vnc_url': f"http://{request.get_host().split(':')[0]}:{web_port}/vnc.html?host={request.get_host().split(':')[0]}&port={web_port}"
+                'vnc_url': f"http://{host_ip}:{web_port}/vnc.html?host={host_ip}&port={web_port}"
             })
-        except libvirt.libvirtError as e:
+
+        except Exception as e:
             return JsonResponse({'error': str(e)}, status=500)
 
     return JsonResponse({'error': 'Phương thức không hợp lệ'}, status=405)
-
 # Liệt kê các VM
 def list_vms(request):
     try:
